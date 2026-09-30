@@ -123,7 +123,7 @@ mod clocks;
 pub use clocks::{Clock, ClockType};
 
 mod nodes;
-pub use nodes::{Node, Timer};
+pub use nodes::{Node, Timer, TopicEndpointInfo};
 
 pub mod qos;
 
