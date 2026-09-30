@@ -1428,6 +1428,149 @@ impl Node {
         Ok(topic_info_list)
     }
 
+    /// Returns the subscriptions on a topic, with their nodes and QoS.
+    pub fn get_subscriptions_info_by_topic(
+        &self, topic_name: &str, no_mangle: bool,
+    ) -> Result<Vec<TopicEndpointInfo>> {
+        let topic_c_string =
+            CString::new(topic_name).map_err(|_| Error::RCL_RET_INVALID_ARGUMENT)?;
+        let mut allocator = unsafe { rcutils_get_default_allocator() };
+        let mut info_array: rcl_topic_endpoint_info_array_t =
+            unsafe { rmw_get_zero_initialized_topic_endpoint_info_array() };
+        let result = unsafe {
+            rcl_get_subscriptions_info_by_topic(
+                self.node_handle.as_ref(),
+                &mut allocator,
+                topic_c_string.as_ptr(),
+                no_mangle,
+                &mut info_array,
+            )
+        };
+        if result != RCL_RET_OK as i32 {
+            unsafe { rmw_topic_endpoint_info_array_fini(&mut info_array, &mut allocator) };
+            return Err(Error::from_rcl_error(result));
+        }
+        let list = convert_info_array_to_vec(&info_array);
+        let result = unsafe { rmw_topic_endpoint_info_array_fini(&mut info_array, &mut allocator) };
+        if result != RCL_RET_OK as i32 {
+            return Err(Error::from_rcl_error(result));
+        }
+        Ok(list)
+    }
+
+    /// Returns the names and namespaces of the nodes this node can see, itself included.
+    pub fn get_node_names(&self) -> Result<Vec<(String, String)>> {
+        let mut names = unsafe { rcutils_get_zero_initialized_string_array() };
+        let mut namespaces = unsafe { rcutils_get_zero_initialized_string_array() };
+        let ret = unsafe {
+            rcl_get_node_names(
+                self.node_handle.as_ref(),
+                rcutils_get_default_allocator(),
+                &mut names,
+                &mut namespaces,
+            )
+        };
+        let out = if ret == RCL_RET_OK as i32 {
+            Ok(string_array(&names)
+                .into_iter()
+                .zip(string_array(&namespaces))
+                .collect())
+        } else {
+            Err(Error::from_rcl_error(ret))
+        };
+        unsafe {
+            rcutils_string_array_fini(&mut names);
+            rcutils_string_array_fini(&mut namespaces);
+        }
+        out
+    }
+
+    /// Returns a map of service names and type names visible to this node.
+    pub fn get_service_names_and_types(&self) -> Result<HashMap<String, Vec<String>>> {
+        let mut nat = unsafe { rmw_get_zero_initialized_names_and_types() };
+        let ret = unsafe {
+            rcl_get_service_names_and_types(
+                self.node_handle.as_ref(),
+                &mut rcutils_get_default_allocator(),
+                &mut nat,
+            )
+        };
+        names_and_types(ret, &mut nat)
+    }
+
+    /// Returns the topics a node publishes, with their types.
+    pub fn get_publisher_names_and_types_by_node(
+        &self, node_name: &str, node_namespace: &str,
+    ) -> Result<HashMap<String, Vec<String>>> {
+        self.by_node(node_name, node_namespace, NodeEntities::Publishers)
+    }
+
+    /// Returns the topics a node subscribes to, with their types.
+    pub fn get_subscriber_names_and_types_by_node(
+        &self, node_name: &str, node_namespace: &str,
+    ) -> Result<HashMap<String, Vec<String>>> {
+        self.by_node(node_name, node_namespace, NodeEntities::Subscribers)
+    }
+
+    /// Returns the services a node offers, with their types.
+    pub fn get_service_names_and_types_by_node(
+        &self, node_name: &str, node_namespace: &str,
+    ) -> Result<HashMap<String, Vec<String>>> {
+        self.by_node(node_name, node_namespace, NodeEntities::Services)
+    }
+
+    /// Returns the services a node calls, with their types.
+    pub fn get_client_names_and_types_by_node(
+        &self, node_name: &str, node_namespace: &str,
+    ) -> Result<HashMap<String, Vec<String>>> {
+        self.by_node(node_name, node_namespace, NodeEntities::Clients)
+    }
+
+    fn by_node(
+        &self, node_name: &str, node_namespace: &str, what: NodeEntities,
+    ) -> Result<HashMap<String, Vec<String>>> {
+        let name = CString::new(node_name).map_err(|_| Error::RCL_RET_INVALID_ARGUMENT)?;
+        let ns = CString::new(node_namespace).map_err(|_| Error::RCL_RET_INVALID_ARGUMENT)?;
+        let mut nat = unsafe { rmw_get_zero_initialized_names_and_types() };
+        let mut allocator = unsafe { rcutils_get_default_allocator() };
+        let node = self.node_handle.as_ref();
+        let ret = unsafe {
+            match what {
+                NodeEntities::Publishers => rcl_get_publisher_names_and_types_by_node(
+                    node,
+                    &mut allocator,
+                    false,
+                    name.as_ptr(),
+                    ns.as_ptr(),
+                    &mut nat,
+                ),
+                NodeEntities::Subscribers => rcl_get_subscriber_names_and_types_by_node(
+                    node,
+                    &mut allocator,
+                    false,
+                    name.as_ptr(),
+                    ns.as_ptr(),
+                    &mut nat,
+                ),
+                NodeEntities::Services => rcl_get_service_names_and_types_by_node(
+                    node,
+                    &mut allocator,
+                    name.as_ptr(),
+                    ns.as_ptr(),
+                    &mut nat,
+                ),
+                NodeEntities::Clients => rcl_get_client_names_and_types_by_node(
+                    node,
+                    &mut allocator,
+                    name.as_ptr(),
+                    ns.as_ptr(),
+                    &mut nat,
+                ),
+            }
+        };
+        names_and_types(ret, &mut nat)
+    }
+
     /// Create a ROS wall timer.
     ///
     /// Create a ROS timer that is woken up by spin every `period`.
@@ -1738,6 +1881,52 @@ impl From<rmw_topic_endpoint_info_t> for TopicEndpointInfo {
             qos_profile,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum NodeEntities {
+    Publishers,
+    Subscribers,
+    Services,
+    Clients,
+}
+
+/// The strings of an rcutils string array, copied out.
+fn string_array(array: &rcutils_string_array_t) -> Vec<String> {
+    if array.data.is_null() {
+        return Vec::new();
+    }
+    let items = unsafe { std::slice::from_raw_parts(array.data, array.size) };
+    items
+        .iter()
+        .filter(|p| !p.is_null())
+        .map(|p| unsafe { CStr::from_ptr(*p).to_string_lossy().into_owned() })
+        .collect()
+}
+
+/// Copies an rmw names-and-types result into a map and frees it, whatever `ret` says.
+fn names_and_types(
+    ret: rcl_ret_t, nat: &mut rmw_names_and_types_t,
+) -> Result<HashMap<String, Vec<String>>> {
+    let mut res = HashMap::new();
+    if ret == RCL_RET_OK as i32 && !nat.names.data.is_null() && !nat.types.is_null() {
+        let names = unsafe { std::slice::from_raw_parts(nat.names.data, nat.names.size) };
+        let types = unsafe { std::slice::from_raw_parts(nat.types, nat.names.size) };
+        for (n, t) in names.iter().zip(types) {
+            if n.is_null() {
+                continue;
+            }
+            let name = unsafe { CStr::from_ptr(*n).to_string_lossy().into_owned() };
+            res.insert(name, string_array(t));
+        }
+    }
+    unsafe {
+        rmw_names_and_types_fini(nat);
+    }
+    if ret != RCL_RET_OK as i32 {
+        return Err(Error::from_rcl_error(ret));
+    }
+    Ok(res)
 }
 
 fn convert_info_array_to_vec(
