@@ -1037,6 +1037,18 @@ impl Node {
             p.poll_has_inter_process_subscribers();
         }
 
+        // A stream its owner dropped is destroyed now, not when its next message arrives,
+        // which on a quiet topic may be never.
+        let node_handle = &mut self.node_handle;
+        self.subscribers.retain_mut(|s| {
+            if s.is_dropped() {
+                s.destroy(node_handle);
+                false
+            } else {
+                true
+            }
+        });
+
         let timeout = timeout.as_nanos() as i64;
         let mut ws = unsafe { rcl_get_zero_initialized_wait_set() };
 
